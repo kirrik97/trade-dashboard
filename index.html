@@ -2,25 +2,28 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Дашборд</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root { color-scheme: dark; }
-  body { margin: 0; background: #0d0d0d; color: #f2f2f2; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-  main { padding: 20px 16px 48px; max-width: 480px; margin: 0 auto; }
-  h1 { font-size: 22px; font-weight: 650; margin: 0 0 8px; }
-  .status { color: #ffb020; font-size: 16px; }
-  .status.err { color: #ff5a5a; }
-  .total { font-size: 40px; font-weight: 700; letter-spacing: -0.03em; margin: 12px 0 4px; }
-  .sub { color: #9a9a9a; font-size: 13px; }
-  .card { background: #171717; border-radius: 14px; padding: 14px 16px; margin-top: 12px; }
+  :root { color-scheme: dark; --bg:#0b0b0c; --card:#161618; --text:#f3f3f3; --muted:#9b9ba0; --up:#3dd68c; --dn:#ff5a5a; --warn:#ffb020; --btn:#2a2a2e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+  main { padding: 20px 16px calc(28px + env(safe-area-inset-bottom)); max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.02em; }
+  .status { color: var(--warn); font-size: 15px; margin: 0 0 8px; }
+  .status.err { color: var(--dn); }
+  .total { font-size: 42px; font-weight: 700; letter-spacing: -0.04em; margin: 10px 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .card { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-top: 10px; }
   .row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
   .name { font-weight: 650; }
-  .up { color: #3dd68c; }
-  .dn { color: #ff5a5a; }
-  .muted { color: #9a9a9a; font-size: 13px; margin-top: 4px; }
-  button { margin-top: 18px; background: #242424; color: #f2f2f2; border: 0; border-radius: 12px; padding: 12px 16px; font: inherit; }
+  .up { color: var(--up); }
+  .dn { color: var(--dn); }
+  .muted { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  button { flex: 1; background: var(--btn); color: var(--text); border: 0; border-radius: 12px; padding: 13px 16px; font: inherit; font-weight: 600; }
+  button:disabled { opacity: 0.55; }
 </style>
 </head>
 <body>
@@ -28,23 +31,28 @@
   <h1>Дашборд</h1>
   <p id="status" class="status">Обновляем информацию</p>
   <div id="view" hidden></div>
-  <button id="reload" type="button">Обновить</button>
+  <div class="actions">
+    <button id="reload" type="button">Обновить</button>
+  </div>
 </main>
 <script>
 const REPO = "kirrik97/trade-dashboard";
+const LIVE_API = (window.DASH_API || localStorage.getItem("DASH_API") || "").replace(/\/$/, "");
 const statusEl = document.getElementById("status");
 const view = document.getElementById("view");
+const reloadBtn = document.getElementById("reload");
 let shownAt = "";
+let busy = false;
+
+const tg = window.Telegram && window.Telegram.WebApp;
 
 function money(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return "—";
-  const sign = v > 0 ? "+" : "";
-  return sign + v.toFixed(4) + " USDT";
+  return (v > 0 ? "+" : "") + v.toFixed(4) + " USDT";
 }
 function tone(n) { return Number(n) < 0 ? "dn" : "up"; }
 function sideRu(side) { return side === "short" ? "шорт" : "лонг"; }
-
 function setStatus(text, isErr) {
   statusEl.hidden = false;
   statusEl.className = isErr ? "status err" : "status";
@@ -72,88 +80,102 @@ function render(data) {
   statusEl.hidden = true;
 }
 
-async function fetchData() {
+async function fetchLive() {
+  if (!LIVE_API) return null;
+  const initData = (tg && tg.initData) || "";
+  if (!initData) throw new Error("need_telegram");
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(LIVE_API + "/api/positions", {
+      method: "GET",
+      cache: "no-store",
+      signal: ctrl.signal,
+      headers: {
+        "Accept": "application/json",
+        "X-Telegram-Init-Data": initData
+      }
+    });
+    if (res.status === 403) throw new Error("need_telegram");
+    if (!res.ok) throw new Error("live_http_" + res.status);
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function fetchStatic() {
   const bust = "t=" + Date.now();
+  // Prefer main raw (bot writes here). Pages/dash-refresh often stale.
   const urls = [
-    "./data.json?" + bust,
-    "https://kirrik97.github.io/trade-dashboard/data.json?" + bust,
-    "https://raw.githubusercontent.com/" + REPO + "/main/data.json?" + bust
+    "https://raw.githubusercontent.com/" + REPO + "/main/data.json?" + bust,
+    "https://cdn.jsdelivr.net/gh/" + REPO + "@main/data.json?" + bust,
+    "./data.json?" + bust
   ];
-  let lastErr;
+  let best = null;
   for (const url of urls) {
     try {
       const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) {
-        lastErr = new Error("http " + res.status);
-        continue;
-      }
-      return await res.json();
-    } catch (err) {
-      lastErr = err;
-    }
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!best || String(data.as_of || "") > String(best.as_of || "")) best = data;
+      // main raw is authoritative enough — take first good from main/cdn
+      if (url.includes("/main/") || url.includes("@main/")) return data;
+    } catch (e) {}
   }
-  throw lastErr || new Error("data");
+  if (best) return best;
+  throw new Error("static_fail");
 }
 
-async function load(attempt) {
+async function load(isManual) {
+  if (busy) return;
+  busy = true;
+  reloadBtn.disabled = true;
   view.hidden = true;
   setStatus("Обновляем информацию", false);
   try {
-    render(await fetchData());
+    let data = null;
+    let liveErr = null;
+    try {
+      data = await fetchLive();
+    } catch (e) {
+      liveErr = e;
+    }
+    if (!data) {
+      if (liveErr && liveErr.message === "need_telegram" && isManual && LIVE_API) {
+        setStatus("Открой дашборд из кнопки в Telegram", true);
+        data = await fetchStatic().catch(() => null);
+        if (data) render(data);
+        return;
+      }
+      data = await fetchStatic();
+    }
+    render(data);
   } catch (err) {
-    if (attempt < 8) setTimeout(() => load(attempt + 1), 800);
-    else setStatus("Не удалось загрузить. Нажми Обновить.", true);
+    setStatus("Не удалось загрузить. Нажми Обновить.", true);
+  } finally {
+    busy = false;
+    reloadBtn.disabled = false;
   }
 }
 
-function pollForFresh(before, left) {
-  const tick = async () => {
-    try {
-      const data = await fetchData();
-      if (data.as_of && data.as_of !== before) {
-        render(data);
-        return;
-      }
-      if (left <= 1) {
-        render(data);
-        setStatus("Срез тот же. Жми «Дашборд» в чате, если нужны свежие цифры с биржи.", false);
-        statusEl.hidden = false;
-        return;
-      }
-    } catch (e) {}
-    left -= 1;
-    if (left > 0) setTimeout(tick, 1500);
-    else load(0);
-  };
-  tick();
-}
-
-function askBot() {
-  const before = shownAt;
-  view.hidden = true;
-  setStatus("Обновляем информацию", false);
-
-  const tg = window.Telegram && window.Telegram.WebApp;
+function boot() {
   if (tg) {
-    try { tg.ready(); tg.expand(); } catch (e) {}
-    // sendData доходит только из KeyboardButton web_app, не из Menu Button.
-    // Даже если вызов «успешен», без доставки бот не пушит — всегда поллим.
     try {
-      if (typeof tg.sendData === "function") tg.sendData("refresh");
+      tg.ready();
+      tg.expand();
+      if (tg.setHeaderColor) tg.setHeaderColor("secondary_bg_color");
     } catch (e) {}
   }
-
-  pollForFresh(before, 24);
-}
-
-(function boot() {
-  const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) {
-    try { tg.ready(); tg.expand(); } catch (e) {}
+  const params = new URLSearchParams(location.search);
+  const api = params.get("api");
+  if (api) {
+    try { localStorage.setItem("DASH_API", api); } catch (e) {}
   }
-  document.getElementById("reload").addEventListener("click", askBot);
-  load(0);
-})();
+  reloadBtn.addEventListener("click", () => load(true));
+  load(false);
+}
+boot();
 </script>
 </body>
 </html>
