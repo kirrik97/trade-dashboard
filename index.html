@@ -34,7 +34,7 @@
   .status.err { color: var(--dn); }
   .status.ok { color: var(--muted); }
   .total { font-size: 42px; font-weight: 700; letter-spacing: -0.04em; margin: 8px 0 2px; }
-  .sub { color: var(--muted); font-size: 13px; }
+  .sub { color: var(--muted); font-size: 13px; line-height: 1.35; }
   .card { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-top: 10px; }
   .row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
   .name { font-weight: 650; }
@@ -107,10 +107,31 @@ function money(n) {
 }
 function tone(n) { return Number(n) < 0 ? "dn" : "up"; }
 function sideRu(side) { return side === "short" ? "шорт" : "лонг"; }
+
+function mskClock(ts) {
+  const d = new Date(ts || Date.now());
+  return d.toLocaleTimeString("ru-RU", {
+    timeZone: "Europe/Moscow",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+}
+
 function setStatus(text, kind) {
   statusEl.hidden = false;
   statusEl.className = "status" + (kind === "err" ? " err" : kind === "ok" ? " ok" : "");
   statusEl.textContent = text;
+}
+
+function haptic(ok) {
+  try {
+    if (tg && tg.HapticFeedback) {
+      if (ok) tg.HapticFeedback.notificationOccurred("success");
+      else tg.HapticFeedback.impactOccurred("light");
+    }
+  } catch (e) {}
 }
 
 function uplFor(p, mark) {
@@ -137,10 +158,17 @@ function computeBook() {
   return { rows, upl_total };
 }
 
+function openIds() {
+  return ((structure && structure.positions) || [])
+    .filter((p) => Number(p.size) !== 0)
+    .map((p) => p.inst);
+}
+
 function render() {
   if (!structure) return;
   const { rows, upl_total } = computeBook();
   const live = lastMarkAt && Date.now() - lastMarkAt < MARK_MS * 3;
+  const quoteTime = lastMarkAt ? mskClock(lastMarkAt) : "—";
   const cards = rows.map((p) => `
     <article class="card">
       <div class="row">
@@ -151,11 +179,14 @@ function render() {
     </article>`).join("");
   view.innerHTML = `
     <div class="total ${tone(upl_total)}">${money(upl_total)}</div>
-    <div class="sub"><span class="live-dot${live ? "" : " off"}"></span>${live ? "Live mark" : "Снимок"} · структура ${structure.as_of || "—"}</div>
+    <div class="sub">
+      <span class="live-dot${live ? "" : " off"}"></span>
+      Котировки ${quoteTime} МСК
+      <br>Состав позиций: ${structure.as_of || "—"}
+    </div>
     ${cards || '<p class="muted">Открытых сделок нет</p>'}
   `;
   view.hidden = false;
-  if (live) setStatus("Котировки OKX обновляются", "ok");
 }
 
 async function fetchStructure() {
@@ -191,7 +222,6 @@ async function ensureCtVal(instIds) {
       if (row && row.ctVal) ctVal[instId] = Number(row.ctVal);
     } catch (e) {}
   }));
-  // fallbacks if instruments blocked
   const fb = {
     "BTC-USDT-SWAP": 0.01,
     "ETH-USDT-SWAP": 0.1,
@@ -206,49 +236,90 @@ async function ensureCtVal(instIds) {
 }
 
 async function fetchMarks(instIds) {
-  if (!instIds.length) return;
+  if (!instIds.length) {
+    lastMarkAt = Date.now();
+    return;
+  }
   await ensureCtVal(instIds);
+  let ok = 0;
   await Promise.all(instIds.map(async (instId) => {
     try {
       const res = await fetch(
-        "https://www.okx.com/api/v5/market/ticker?instId=" + encodeURIComponent(instId),
+        "https://www.okx.com/api/v5/market/ticker?instId=" + encodeURIComponent(instId) + "&_=" + Date.now(),
         { cache: "no-store" }
       );
       const body = await res.json();
       const last = body && body.data && body.data[0] && body.data[0].last;
       const mark = Number(last);
-      if (Number.isFinite(mark)) marks[instId] = mark;
+      if (Number.isFinite(mark)) {
+        marks[instId] = mark;
+        ok += 1;
+      }
     } catch (e) {}
   }));
-  lastMarkAt = Date.now();
+  if (ok > 0) lastMarkAt = Date.now();
+  return ok;
 }
 
-async function refreshStructure(manual) {
+async function loadStructureQuiet() {
+  try {
+    structure = await fetchStructure();
+  } catch (e) {}
+}
+
+/** Кнопка «Обновить»: сразу живые котировки OKX + время «сейчас». */
+async function onRefreshClick() {
   if (busy) return;
   busy = true;
-  if (manual) reloadBtn.disabled = true;
+  reloadBtn.disabled = true;
+  const prevLabel = reloadBtn.textContent;
+  reloadBtn.textContent = "Обновляю…";
+  setStatus("Снимаем котировки OKX…", null);
+  haptic(false);
+
   try {
-    if (manual) setStatus("Обновляем структуру…", null);
-    structure = await fetchStructure();
-    const ids = (structure.positions || []).filter((p) => Number(p.size) !== 0).map((p) => p.inst);
-    await fetchMarks(ids);
+    if (!structure) await loadStructureQuiet();
+    // параллельно: marks (главное) + свежий data.json (состав)
+    const ids = openIds();
+    const [markCount] = await Promise.all([
+      fetchMarks(ids.length ? ids : ["BTC-USDT-SWAP"]),
+      loadStructureQuiet()
+    ]);
+    // если структура подтянулась с новыми монетами — marks ещё раз
+    const ids2 = openIds();
+    if (ids2.join() !== ids.join()) await fetchMarks(ids2);
+
     render();
+    if (markCount > 0 || lastMarkAt) {
+      setStatus("Обновлено " + mskClock(lastMarkAt) + " МСК", "ok");
+      haptic(true);
+      reloadBtn.textContent = "Готово";
+    } else {
+      setStatus("Не удалось снять котировки. Повтори.", "err");
+      reloadBtn.textContent = prevLabel;
+    }
   } catch (e) {
-    if (!structure) setStatus("Не удалось загрузить позиции. Нажми Обновить.", "err");
-    else setStatus("Структура устарела, mark живой", "ok");
+    setStatus("Ошибка обновления. Повтори.", "err");
+    reloadBtn.textContent = prevLabel;
   } finally {
     busy = false;
     reloadBtn.disabled = false;
+    setTimeout(() => {
+      if (reloadBtn.textContent === "Готово") reloadBtn.textContent = "Обновить";
+    }, 1200);
   }
 }
 
-async function refreshMarksOnly() {
-  if (!structure) return;
-  const ids = (structure.positions || []).filter((p) => Number(p.size) !== 0).map((p) => p.inst);
+async function bootLoad() {
+  setStatus("Загрузка…", null);
   try {
-    await fetchMarks(ids);
+    structure = await fetchStructure();
+    await fetchMarks(openIds());
     render();
-  } catch (e) {}
+    setStatus("Обновлено " + mskClock(lastMarkAt) + " МСК", "ok");
+  } catch (e) {
+    setStatus("Не удалось загрузить. Нажми Обновить.", "err");
+  }
 }
 
 function boot() {
@@ -262,15 +333,22 @@ function boot() {
     } catch (e) {}
   }
 
-  reloadBtn.addEventListener("click", () => refreshStructure(true));
+  reloadBtn.addEventListener("click", onRefreshClick);
 
-  refreshStructure(false).then(() => {
-    markTimer = setInterval(refreshMarksOnly, MARK_MS);
-    structTimer = setInterval(() => refreshStructure(false), STRUCT_MS);
+  bootLoad().then(() => {
+    markTimer = setInterval(async () => {
+      if (busy || !structure) return;
+      await fetchMarks(openIds());
+      render();
+      if (lastMarkAt) setStatus("Обновлено " + mskClock(lastMarkAt) + " МСК", "ok");
+    }, MARK_MS);
+    structTimer = setInterval(() => {
+      if (!busy) loadStructureQuiet().then(() => render());
+    }, STRUCT_MS);
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshMarksOnly();
+    if (document.visibilityState === "visible" && !busy) onRefreshClick();
   });
 }
 
