@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
 <title>Дашборд</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
@@ -30,6 +32,13 @@
     margin: 0 auto;
   }
   h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .clock {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0 0 6px;
+    font-variant-numeric: tabular-nums;
+  }
   .status { color: var(--warn); font-size: 14px; margin: 0 0 8px; min-height: 1.2em; }
   .status.err { color: var(--dn); }
   .status.ok { color: var(--muted); }
@@ -60,10 +69,9 @@
     background: var(--up);
     margin-right: 6px;
     vertical-align: middle;
-    box-shadow: 0 0 0 0 rgba(61, 214, 140, 0.6);
     animation: pulse 2s infinite;
   }
-  .live-dot.off { background: var(--muted); animation: none; box-shadow: none; }
+  .live-dot.off { background: var(--muted); animation: none; }
   @keyframes pulse {
     0% { box-shadow: 0 0 0 0 rgba(61, 214, 140, 0.55); }
     70% { box-shadow: 0 0 0 8px rgba(61, 214, 140, 0); }
@@ -74,6 +82,7 @@
 <body>
 <main>
   <h1>Дашборд</h1>
+  <div id="clock" class="clock">—</div>
   <p id="status" class="status">Загрузка…</p>
   <div id="view" hidden></div>
   <div class="actions">
@@ -81,24 +90,33 @@
   </div>
 </main>
 <script>
+const BUILD = "20261024-2304";
+(function bustTelegramCache() {
+  try {
+    const u = new URL(location.href);
+    if (u.searchParams.get("b") !== BUILD) {
+      u.searchParams.set("b", BUILD);
+      location.replace(u.toString());
+      return;
+    }
+  } catch (e) {}
+})();
+
 const REPO = "kirrik97/trade-dashboard";
 const MARK_MS = 3000;
-const STRUCT_MS = 45000;
+const STRUCT_MS = 60000;
 const statusEl = document.getElementById("status");
 const view = document.getElementById("view");
+const clockEl = document.getElementById("clock");
 const reloadBtn = document.getElementById("reload");
 const tg = window.Telegram && window.Telegram.WebApp;
 
-/** @type {{as_of:string, positions:any[]} | null} */
 let structure = null;
-/** @type {Record<string, number>} */
 let ctVal = {};
-/** @type {Record<string, number>} */
 let marks = {};
 let lastMarkAt = 0;
+let lastRefreshAt = 0;
 let busy = false;
-let markTimer = 0;
-let structTimer = 0;
 
 function money(n) {
   const v = Number(n);
@@ -108,15 +126,17 @@ function money(n) {
 function tone(n) { return Number(n) < 0 ? "dn" : "up"; }
 function sideRu(side) { return side === "short" ? "шорт" : "лонг"; }
 
-function mskClock(ts) {
+function mskParts(ts) {
   const d = new Date(ts || Date.now());
-  return d.toLocaleTimeString("ru-RU", {
+  const parts = new Intl.DateTimeFormat("ru-RU", {
     timeZone: "Europe/Moscow",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hour12: false
-  });
+  }).formatToParts(d);
+  const get = (t) => (parts.find((p) => p.type === t) || {}).value || "00";
+  return get("hour") + ":" + get("minute") + ":" + get("second");
 }
 
 function setStatus(text, kind) {
@@ -134,6 +154,23 @@ function haptic(ok) {
   } catch (e) {}
 }
 
+function tickClock() {
+  const now = mskParts(Date.now());
+  const quote = lastMarkAt ? mskParts(lastMarkAt) : "—";
+  const pressed = lastRefreshAt ? mskParts(lastRefreshAt) : null;
+  clockEl.textContent = "Сейчас " + now + " МСК";
+  if (structure && view && !view.hidden) {
+    const sub = view.querySelector(".sub");
+    if (sub) {
+      const live = lastMarkAt && Date.now() - lastMarkAt < MARK_MS * 4;
+      sub.innerHTML =
+        '<span class="live-dot' + (live ? "" : " off") + '"></span>' +
+        "Mark " + quote + " МСК" +
+        (pressed ? " · кнопка " + pressed : "");
+    }
+  }
+}
+
 function uplFor(p, mark) {
   const size = Number(p.size);
   const entry = Number(p.entry);
@@ -143,6 +180,12 @@ function uplFor(p, mark) {
   }
   const diff = p.side === "short" ? (entry - mark) : (mark - entry);
   return size * mult * diff;
+}
+
+function openIds() {
+  return ((structure && structure.positions) || [])
+    .filter((p) => Number(p.size) !== 0)
+    .map((p) => p.inst);
 }
 
 function computeBook() {
@@ -158,17 +201,9 @@ function computeBook() {
   return { rows, upl_total };
 }
 
-function openIds() {
-  return ((structure && structure.positions) || [])
-    .filter((p) => Number(p.size) !== 0)
-    .map((p) => p.inst);
-}
-
 function render() {
   if (!structure) return;
   const { rows, upl_total } = computeBook();
-  const live = lastMarkAt && Date.now() - lastMarkAt < MARK_MS * 3;
-  const quoteTime = lastMarkAt ? mskClock(lastMarkAt) : "—";
   const cards = rows.map((p) => `
     <article class="card">
       <div class="row">
@@ -179,18 +214,15 @@ function render() {
     </article>`).join("");
   view.innerHTML = `
     <div class="total ${tone(upl_total)}">${money(upl_total)}</div>
-    <div class="sub">
-      <span class="live-dot${live ? "" : " off"}"></span>
-      Котировки ${quoteTime} МСК
-      <br>Состав позиций: ${structure.as_of || "—"}
-    </div>
+    <div class="sub"></div>
     ${cards || '<p class="muted">Открытых сделок нет</p>'}
   `;
   view.hidden = false;
+  tickClock();
 }
 
 async function fetchStructure() {
-  const bust = "t=" + Date.now();
+  const bust = "t=" + Date.now() + "&b=" + BUILD;
   const urls = [
     "https://raw.githubusercontent.com/" + REPO + "/main/data.json?" + bust,
     "https://cdn.jsdelivr.net/gh/" + REPO + "@main/data.json?" + bust,
@@ -236,13 +268,14 @@ async function ensureCtVal(instIds) {
 }
 
 async function fetchMarks(instIds) {
-  if (!instIds.length) {
+  const ids = instIds && instIds.length ? instIds : [];
+  if (!ids.length) {
     lastMarkAt = Date.now();
-    return;
+    return 0;
   }
-  await ensureCtVal(instIds);
+  await ensureCtVal(ids);
   let ok = 0;
-  await Promise.all(instIds.map(async (instId) => {
+  await Promise.all(ids.map(async (instId) => {
     try {
       const res = await fetch(
         "https://www.okx.com/api/v5/market/ticker?instId=" + encodeURIComponent(instId) + "&_=" + Date.now(),
@@ -257,69 +290,52 @@ async function fetchMarks(instIds) {
       }
     } catch (e) {}
   }));
-  if (ok > 0) lastMarkAt = Date.now();
+  // Часы кнопки двигаем всегда — даже если биржа вернула тот же mark.
+  lastMarkAt = Date.now();
   return ok;
 }
 
-async function loadStructureQuiet() {
-  try {
-    structure = await fetchStructure();
-  } catch (e) {}
-}
-
-/** Кнопка «Обновить»: сразу живые котировки OKX + время «сейчас». */
 async function onRefreshClick() {
   if (busy) return;
   busy = true;
   reloadBtn.disabled = true;
-  const prevLabel = reloadBtn.textContent;
   reloadBtn.textContent = "Обновляю…";
-  setStatus("Снимаем котировки OKX…", null);
+  setStatus("Снимаем OKX…", null);
   haptic(false);
+  lastRefreshAt = Date.now();
+  tickClock();
 
   try {
-    if (!structure) await loadStructureQuiet();
-    // параллельно: marks (главное) + свежий data.json (состав)
-    const ids = openIds();
-    const [markCount] = await Promise.all([
-      fetchMarks(ids.length ? ids : ["BTC-USDT-SWAP"]),
-      loadStructureQuiet()
-    ]);
-    // если структура подтянулась с новыми монетами — marks ещё раз
-    const ids2 = openIds();
-    if (ids2.join() !== ids.join()) await fetchMarks(ids2);
-
-    render();
-    if (markCount > 0 || lastMarkAt) {
-      setStatus("Обновлено " + mskClock(lastMarkAt) + " МСК", "ok");
-      haptic(true);
-      reloadBtn.textContent = "Готово";
+    if (!structure) {
+      structure = await fetchStructure();
     } else {
-      setStatus("Не удалось снять котировки. Повтори.", "err");
-      reloadBtn.textContent = prevLabel;
+      fetchStructure().then((d) => { structure = d; }).catch(() => {});
     }
+    const n = await fetchMarks(openIds());
+    render();
+    lastRefreshAt = Date.now();
+    setStatus("Обновлено " + mskParts(lastRefreshAt) + " МСК", "ok");
+    haptic(n >= 0);
+    reloadBtn.textContent = "Готово";
   } catch (e) {
-    setStatus("Ошибка обновления. Повтори.", "err");
-    reloadBtn.textContent = prevLabel;
+    setStatus("Ошибка. Нажми ещё раз.", "err");
+    reloadBtn.textContent = "Обновить";
   } finally {
     busy = false;
     reloadBtn.disabled = false;
     setTimeout(() => {
       if (reloadBtn.textContent === "Готово") reloadBtn.textContent = "Обновить";
-    }, 1200);
+    }, 900);
   }
 }
 
 async function bootLoad() {
   setStatus("Загрузка…", null);
-  try {
-    structure = await fetchStructure();
-    await fetchMarks(openIds());
-    render();
-    setStatus("Обновлено " + mskClock(lastMarkAt) + " МСК", "ok");
-  } catch (e) {
-    setStatus("Не удалось загрузить. Нажми Обновить.", "err");
-  }
+  structure = await fetchStructure();
+  await fetchMarks(openIds());
+  lastRefreshAt = Date.now();
+  render();
+  setStatus("Обновлено " + mskParts(lastRefreshAt) + " МСК", "ok");
 }
 
 function boot() {
@@ -327,28 +343,32 @@ function boot() {
     try {
       tg.ready();
       tg.expand();
-      if (typeof tg.enableClosingConfirmation === "function") tg.enableClosingConfirmation(false);
       if (tg.setHeaderColor) tg.setHeaderColor("secondary_bg_color");
       if (tg.setBackgroundColor) tg.setBackgroundColor("#0b0b0c");
     } catch (e) {}
   }
 
   reloadBtn.addEventListener("click", onRefreshClick);
+  setInterval(tickClock, 250);
+  tickClock();
 
-  bootLoad().then(() => {
-    markTimer = setInterval(async () => {
-      if (busy || !structure) return;
-      await fetchMarks(openIds());
-      render();
-      if (lastMarkAt) setStatus("Обновлено " + mskClock(lastMarkAt) + " МСК", "ok");
-    }, MARK_MS);
-    structTimer = setInterval(() => {
-      if (!busy) loadStructureQuiet().then(() => render());
-    }, STRUCT_MS);
-  });
+  bootLoad()
+    .then(() => {
+      setInterval(async () => {
+        if (busy || !structure) return;
+        await fetchMarks(openIds());
+        render();
+        setStatus("Обновлено " + mskParts(lastMarkAt) + " МСК", "ok");
+      }, MARK_MS);
+      setInterval(() => {
+        if (busy) return;
+        fetchStructure().then((d) => { structure = d; render(); }).catch(() => {});
+      }, STRUCT_MS);
+    })
+    .catch(() => setStatus("Не загрузилось. Нажми Обновить.", "err"));
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && !busy) onRefreshClick();
+    if (document.visibilityState === "visible") onRefreshClick();
   });
 }
 
