@@ -32,6 +32,7 @@
 const REPO = "kirrik97/trade-dashboard";
 const statusEl = document.getElementById("status");
 const view = document.getElementById("view");
+let shownAt = "";
 
 function money(n) {
   const v = Number(n);
@@ -53,9 +54,10 @@ function render(data) {
       </div>
       <div class="muted">${sideRu(p.side)} · размер ${p.size} · вход ${p.entry}${p.lev ? " · " + p.lev + "x" : ""}</div>
     </article>`).join("");
+  shownAt = data.as_of || "";
   view.innerHTML = `
     <div class="total ${tone(data.upl_total)}">${money(data.upl_total)}</div>
-    <div class="sub">Нереализованный PnL по всем открытым сделкам${data.as_of ? " · " + data.as_of : ""}</div>
+    <div class="sub">Срез ${shownAt || "—"}</div>
     ${cards || '<p class="muted">Открытых сделок нет</p>'}
   `;
   view.hidden = false;
@@ -63,7 +65,7 @@ function render(data) {
 }
 
 async function latestSha() {
-  const res = await fetch("https://api.github.com/repos/" + REPO + "/commits/main", {
+  const res = await fetch("https://api.github.com/repos/" + REPO + "/commits/main?t=" + Date.now(), {
     cache: "no-store",
     headers: { Accept: "application/vnd.github+json" }
   });
@@ -80,7 +82,7 @@ async function load(attempt) {
   statusEl.textContent = "Обновляем информацию";
   try {
     const sha = await latestSha();
-    const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + sha + "/data.json", { cache: "no-store" });
+    const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + sha + "/data.json?t=" + Date.now(), { cache: "no-store" });
     if (!res.ok) throw new Error("data");
     render(await res.json());
   } catch (err) {
@@ -88,7 +90,41 @@ async function load(attempt) {
   }
 }
 
-document.getElementById("reload").addEventListener("click", () => load(0));
+function askBot() {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  statusEl.hidden = false;
+  view.hidden = true;
+  statusEl.className = "status";
+  statusEl.textContent = "Обновляем информацию";
+  if (tg && typeof tg.sendData === "function") {
+    try {
+      tg.ready();
+      tg.sendData("refresh");
+      return;
+    } catch (e) {}
+  }
+  const before = shownAt;
+  let left = 20;
+  const tick = async () => {
+    try {
+      const sha = await latestSha();
+      const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + sha + "/data.json?t=" + Date.now(), { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.as_of && data.as_of !== before) {
+          render(data);
+          return;
+        }
+      }
+    } catch (e) {}
+    left -= 1;
+    if (left > 0) setTimeout(tick, 2000);
+    else load(0);
+  };
+  tick();
+}
+
+document.getElementById("reload").addEventListener("click", askBot);
 load(0);
 </script>
 </body>
