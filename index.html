@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Дашборд</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0d0d0d; color: #f2f2f2; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  main { padding: 20px 16px 48px; max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 8px; }
+  .status { color: #ffb020; font-size: 16px; }
+  .total { font-size: 40px; font-weight: 700; letter-spacing: -0.03em; margin: 12px 0 4px; }
+  .sub { color: #9a9a9a; font-size: 13px; }
+  .card { background: #171717; border-radius: 14px; padding: 14px 16px; margin-top: 12px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .name { font-weight: 650; }
+  .up { color: #3dd68c; }
+  .dn { color: #ff5a5a; }
+  .muted { color: #9a9a9a; font-size: 13px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Дашборд</h1>
+  <p id="status" class="status">Обновляем информацию</p>
+  <div id="view" hidden></div>
+</main>
+<script>
+const REPO = "kirrik97/trade-dashboard";
+const statusEl = document.getElementById("status");
+const view = document.getElementById("view");
+const sha = new URLSearchParams(location.search).get("sha");
+
+function money(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "—";
+  const sign = v > 0 ? "+" : "";
+  return sign + v.toFixed(4) + " USDT";
+}
+function tone(n) { return Number(n) < 0 ? "dn" : "up"; }
+function sideRu(side) { return side === "short" ? "шорт" : "лонг"; }
+
+function render(data) {
+  const positions = Array.isArray(data.positions) ? data.positions : [];
+  const open = positions.filter((p) => Number(p.size) !== 0);
+  const cards = open.map((p) => `
+    <article class="card">
+      <div class="row">
+        <div class="name">${p.inst}</div>
+        <div class="${tone(p.upl)}">${money(p.upl)}</div>
+      </div>
+      <div class="muted">${sideRu(p.side)} · размер ${p.size} · вход ${p.entry}${p.lev ? " · " + p.lev + "x" : ""}</div>
+    </article>`).join("");
+  view.innerHTML = `
+    <div class="total ${tone(data.upl_total)}">${money(data.upl_total)}</div>
+    <div class="sub">Нереализованный PnL по всем открытым сделкам${data.as_of ? " · " + data.as_of : ""}</div>
+    ${cards || '<p class="muted">Открытых сделок нет</p>'}
+  `;
+  view.hidden = false;
+  statusEl.hidden = true;
+}
+
+async function load(attempt) {
+  if (!sha) {
+    statusEl.textContent = "Нажми «Дашборд» в боте. Сниму свежий срез и открою его здесь.";
+    statusEl.className = "sub";
+    return;
+  }
+  statusEl.hidden = false;
+  statusEl.className = "status";
+  statusEl.textContent = "Обновляем информацию";
+  try {
+    const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + sha + "/data.json", { cache: "no-store" });
+    if (!res.ok) throw new Error(String(res.status));
+    render(await res.json());
+  } catch (err) {
+    if (attempt < 20) setTimeout(() => load(attempt + 1), 2000);
+  }
+}
+load(0);
+</script>
+</body>
+</html>
