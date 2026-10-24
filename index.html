@@ -6,14 +6,34 @@
 <title>Дашборд</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root { color-scheme: dark; --bg:#0b0b0c; --card:#161618; --text:#f3f3f3; --muted:#9b9ba0; --up:#3dd68c; --dn:#ff5a5a; --warn:#ffb020; --btn:#2a2a2e; }
+  :root {
+    color-scheme: dark;
+    --bg: #0b0b0c;
+    --card: #161618;
+    --text: #f3f3f3;
+    --muted: #9b9ba0;
+    --up: #3dd68c;
+    --dn: #ff5a5a;
+    --warn: #ffb020;
+    --btn: #2a2a2e;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
-  main { padding: 20px 16px calc(28px + env(safe-area-inset-bottom)); max-width: 480px; margin: 0 auto; }
-  h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.02em; }
-  .status { color: var(--warn); font-size: 15px; margin: 0 0 8px; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+  main {
+    padding: 20px 16px calc(28px + env(safe-area-inset-bottom));
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .status { color: var(--warn); font-size: 14px; margin: 0 0 8px; min-height: 1.2em; }
   .status.err { color: var(--dn); }
-  .total { font-size: 42px; font-weight: 700; letter-spacing: -0.04em; margin: 10px 0 2px; }
+  .status.ok { color: var(--muted); }
+  .total { font-size: 42px; font-weight: 700; letter-spacing: -0.04em; margin: 8px 0 2px; }
   .sub { color: var(--muted); font-size: 13px; }
   .card { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-top: 10px; }
   .row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
@@ -22,14 +42,39 @@
   .dn { color: var(--dn); }
   .muted { color: var(--muted); font-size: 13px; margin-top: 4px; }
   .actions { display: flex; gap: 10px; margin-top: 18px; }
-  button { flex: 1; background: var(--btn); color: var(--text); border: 0; border-radius: 12px; padding: 13px 16px; font: inherit; font-weight: 600; }
+  button {
+    flex: 1;
+    background: var(--btn);
+    color: var(--text);
+    border: 0;
+    border-radius: 12px;
+    padding: 13px 16px;
+    font: inherit;
+    font-weight: 600;
+  }
   button:disabled { opacity: 0.55; }
+  .live-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--up);
+    margin-right: 6px;
+    vertical-align: middle;
+    box-shadow: 0 0 0 0 rgba(61, 214, 140, 0.6);
+    animation: pulse 2s infinite;
+  }
+  .live-dot.off { background: var(--muted); animation: none; box-shadow: none; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(61, 214, 140, 0.55); }
+    70% { box-shadow: 0 0 0 8px rgba(61, 214, 140, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(61, 214, 140, 0); }
+  }
 </style>
 </head>
 <body>
 <main>
   <h1>Дашборд</h1>
-  <p id="status" class="status">Обновляем информацию</p>
+  <p id="status" class="status">Загрузка…</p>
   <div id="view" hidden></div>
   <div class="actions">
     <button id="reload" type="button">Обновить</button>
@@ -37,14 +82,23 @@
 </main>
 <script>
 const REPO = "kirrik97/trade-dashboard";
-const LIVE_API = (window.DASH_API || localStorage.getItem("DASH_API") || "").replace(/\/$/, "");
+const MARK_MS = 3000;
+const STRUCT_MS = 45000;
 const statusEl = document.getElementById("status");
 const view = document.getElementById("view");
 const reloadBtn = document.getElementById("reload");
-let shownAt = "";
-let busy = false;
-
 const tg = window.Telegram && window.Telegram.WebApp;
+
+/** @type {{as_of:string, positions:any[]} | null} */
+let structure = null;
+/** @type {Record<string, number>} */
+let ctVal = {};
+/** @type {Record<string, number>} */
+let marks = {};
+let lastMarkAt = 0;
+let busy = false;
+let markTimer = 0;
+let structTimer = 0;
 
 function money(n) {
   const v = Number(n);
@@ -53,110 +107,148 @@ function money(n) {
 }
 function tone(n) { return Number(n) < 0 ? "dn" : "up"; }
 function sideRu(side) { return side === "short" ? "шорт" : "лонг"; }
-function setStatus(text, isErr) {
+function setStatus(text, kind) {
   statusEl.hidden = false;
-  statusEl.className = isErr ? "status err" : "status";
+  statusEl.className = "status" + (kind === "err" ? " err" : kind === "ok" ? " ok" : "");
   statusEl.textContent = text;
 }
 
-function render(data) {
-  const positions = Array.isArray(data.positions) ? data.positions : [];
+function uplFor(p, mark) {
+  const size = Number(p.size);
+  const entry = Number(p.entry);
+  const mult = Number(ctVal[p.inst] || p.ctVal || 0);
+  if (!Number.isFinite(size) || !Number.isFinite(entry) || !Number.isFinite(mark) || !mult) {
+    return Number(p.upl);
+  }
+  const diff = p.side === "short" ? (entry - mark) : (mark - entry);
+  return size * mult * diff;
+}
+
+function computeBook() {
+  const positions = (structure && structure.positions) || [];
   const open = positions.filter((p) => Number(p.size) !== 0);
-  const cards = open.map((p) => `
+  let upl_total = 0;
+  const rows = open.map((p) => {
+    const mark = marks[p.inst];
+    const upl = Number.isFinite(mark) ? uplFor(p, mark) : Number(p.upl);
+    upl_total += Number.isFinite(upl) ? upl : 0;
+    return { ...p, mark, upl };
+  });
+  return { rows, upl_total };
+}
+
+function render() {
+  if (!structure) return;
+  const { rows, upl_total } = computeBook();
+  const live = lastMarkAt && Date.now() - lastMarkAt < MARK_MS * 3;
+  const cards = rows.map((p) => `
     <article class="card">
       <div class="row">
         <div class="name">${p.inst}</div>
         <div class="${tone(p.upl)}">${money(p.upl)}</div>
       </div>
-      <div class="muted">${sideRu(p.side)} · размер ${p.size} · вход ${p.entry}${p.lev ? " · " + p.lev + "x" : ""}</div>
+      <div class="muted">${sideRu(p.side)} · размер ${p.size} · вход ${p.entry}${p.lev ? " · " + p.lev + "x" : ""}${Number.isFinite(p.mark) ? " · mark " + Number(p.mark) : ""}</div>
     </article>`).join("");
-  shownAt = data.as_of || "";
   view.innerHTML = `
-    <div class="total ${tone(data.upl_total)}">${money(data.upl_total)}</div>
-    <div class="sub">Срез ${shownAt || "—"}</div>
+    <div class="total ${tone(upl_total)}">${money(upl_total)}</div>
+    <div class="sub"><span class="live-dot${live ? "" : " off"}"></span>${live ? "Live mark" : "Снимок"} · структура ${structure.as_of || "—"}</div>
     ${cards || '<p class="muted">Открытых сделок нет</p>'}
   `;
   view.hidden = false;
-  statusEl.hidden = true;
+  if (live) setStatus("Котировки OKX обновляются", "ok");
 }
 
-async function fetchLive() {
-  if (!LIVE_API) return null;
-  const initData = (tg && tg.initData) || "";
-  if (!initData) throw new Error("need_telegram");
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 8000);
-  try {
-    const res = await fetch(LIVE_API + "/api/positions", {
-      method: "GET",
-      cache: "no-store",
-      signal: ctrl.signal,
-      headers: {
-        "Accept": "application/json",
-        "X-Telegram-Init-Data": initData
-      }
-    });
-    if (res.status === 403) throw new Error("need_telegram");
-    if (!res.ok) throw new Error("live_http_" + res.status);
-    return await res.json();
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function fetchStatic() {
+async function fetchStructure() {
   const bust = "t=" + Date.now();
-  // Prefer main raw (bot writes here). Pages/dash-refresh often stale.
   const urls = [
     "https://raw.githubusercontent.com/" + REPO + "/main/data.json?" + bust,
     "https://cdn.jsdelivr.net/gh/" + REPO + "@main/data.json?" + bust,
     "./data.json?" + bust
   ];
-  let best = null;
+  let lastErr;
   for (const url of urls) {
     try {
       const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) continue;
+      if (!res.ok) throw new Error("http " + res.status);
       const data = await res.json();
-      if (!best || String(data.as_of || "") > String(best.as_of || "")) best = data;
-      // main raw is authoritative enough — take first good from main/cdn
-      if (url.includes("/main/") || url.includes("@main/")) return data;
-    } catch (e) {}
+      if (!Array.isArray(data.positions)) throw new Error("bad json");
+      return data;
+    } catch (e) { lastErr = e; }
   }
-  if (best) return best;
-  throw new Error("static_fail");
+  throw lastErr || new Error("structure");
 }
 
-async function load(isManual) {
+async function ensureCtVal(instIds) {
+  const missing = instIds.filter((id) => !ctVal[id]);
+  await Promise.all(missing.map(async (instId) => {
+    try {
+      const res = await fetch(
+        "https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=" + encodeURIComponent(instId),
+        { cache: "force-cache" }
+      );
+      const body = await res.json();
+      const row = body && body.data && body.data[0];
+      if (row && row.ctVal) ctVal[instId] = Number(row.ctVal);
+    } catch (e) {}
+  }));
+  // fallbacks if instruments blocked
+  const fb = {
+    "BTC-USDT-SWAP": 0.01,
+    "ETH-USDT-SWAP": 0.1,
+    "SOL-USDT-SWAP": 1,
+    "BNB-USDT-SWAP": 0.01,
+    "XRP-USDT-SWAP": 10,
+    "TRX-USDT-SWAP": 100
+  };
+  for (const id of instIds) {
+    if (!ctVal[id] && fb[id]) ctVal[id] = fb[id];
+  }
+}
+
+async function fetchMarks(instIds) {
+  if (!instIds.length) return;
+  await ensureCtVal(instIds);
+  await Promise.all(instIds.map(async (instId) => {
+    try {
+      const res = await fetch(
+        "https://www.okx.com/api/v5/market/ticker?instId=" + encodeURIComponent(instId),
+        { cache: "no-store" }
+      );
+      const body = await res.json();
+      const last = body && body.data && body.data[0] && body.data[0].last;
+      const mark = Number(last);
+      if (Number.isFinite(mark)) marks[instId] = mark;
+    } catch (e) {}
+  }));
+  lastMarkAt = Date.now();
+}
+
+async function refreshStructure(manual) {
   if (busy) return;
   busy = true;
-  reloadBtn.disabled = true;
-  view.hidden = true;
-  setStatus("Обновляем информацию", false);
+  if (manual) reloadBtn.disabled = true;
   try {
-    let data = null;
-    let liveErr = null;
-    try {
-      data = await fetchLive();
-    } catch (e) {
-      liveErr = e;
-    }
-    if (!data) {
-      if (liveErr && liveErr.message === "need_telegram" && isManual && LIVE_API) {
-        setStatus("Открой дашборд из кнопки в Telegram", true);
-        data = await fetchStatic().catch(() => null);
-        if (data) render(data);
-        return;
-      }
-      data = await fetchStatic();
-    }
-    render(data);
-  } catch (err) {
-    setStatus("Не удалось загрузить. Нажми Обновить.", true);
+    if (manual) setStatus("Обновляем структуру…", null);
+    structure = await fetchStructure();
+    const ids = (structure.positions || []).filter((p) => Number(p.size) !== 0).map((p) => p.inst);
+    await fetchMarks(ids);
+    render();
+  } catch (e) {
+    if (!structure) setStatus("Не удалось загрузить позиции. Нажми Обновить.", "err");
+    else setStatus("Структура устарела, mark живой", "ok");
   } finally {
     busy = false;
     reloadBtn.disabled = false;
   }
+}
+
+async function refreshMarksOnly() {
+  if (!structure) return;
+  const ids = (structure.positions || []).filter((p) => Number(p.size) !== 0).map((p) => p.inst);
+  try {
+    await fetchMarks(ids);
+    render();
+  } catch (e) {}
 }
 
 function boot() {
@@ -164,17 +256,24 @@ function boot() {
     try {
       tg.ready();
       tg.expand();
+      if (typeof tg.enableClosingConfirmation === "function") tg.enableClosingConfirmation(false);
       if (tg.setHeaderColor) tg.setHeaderColor("secondary_bg_color");
+      if (tg.setBackgroundColor) tg.setBackgroundColor("#0b0b0c");
     } catch (e) {}
   }
-  const params = new URLSearchParams(location.search);
-  const api = params.get("api");
-  if (api) {
-    try { localStorage.setItem("DASH_API", api); } catch (e) {}
-  }
-  reloadBtn.addEventListener("click", () => load(true));
-  load(false);
+
+  reloadBtn.addEventListener("click", () => refreshStructure(true));
+
+  refreshStructure(false).then(() => {
+    markTimer = setInterval(refreshMarksOnly, MARK_MS);
+    structTimer = setInterval(() => refreshStructure(false), STRUCT_MS);
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshMarksOnly();
+  });
 }
+
 boot();
 </script>
 </body>
