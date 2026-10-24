@@ -4,12 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Дашборд</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; background: #0d0d0d; color: #f2f2f2; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
   main { padding: 20px 16px 48px; max-width: 480px; margin: 0 auto; }
   h1 { font-size: 22px; font-weight: 650; margin: 0 0 8px; }
   .status { color: #ffb020; font-size: 16px; }
+  .status.err { color: #ff5a5a; }
   .total { font-size: 40px; font-weight: 700; letter-spacing: -0.03em; margin: 12px 0 4px; }
   .sub { color: #9a9a9a; font-size: 13px; }
   .card { background: #171717; border-radius: 14px; padding: 14px 16px; margin-top: 12px; }
@@ -43,6 +45,12 @@ function money(n) {
 function tone(n) { return Number(n) < 0 ? "dn" : "up"; }
 function sideRu(side) { return side === "short" ? "шорт" : "лонг"; }
 
+function setStatus(text, isErr) {
+  statusEl.hidden = false;
+  statusEl.className = isErr ? "status err" : "status";
+  statusEl.textContent = text;
+}
+
 function render(data) {
   const positions = Array.isArray(data.positions) ? data.positions : [];
   const open = positions.filter((p) => Number(p.size) !== 0);
@@ -64,68 +72,88 @@ function render(data) {
   statusEl.hidden = true;
 }
 
-async function latestSha() {
-  const res = await fetch("https://api.github.com/repos/" + REPO + "/commits/main?t=" + Date.now(), {
-    cache: "no-store",
-    headers: { Accept: "application/vnd.github+json" }
-  });
-  if (!res.ok) throw new Error("sha");
-  const body = await res.json();
-  if (!body.sha) throw new Error("sha");
-  return body.sha;
+async function fetchData() {
+  const bust = "t=" + Date.now();
+  const urls = [
+    "./data.json?" + bust,
+    "https://kirrik97.github.io/trade-dashboard/data.json?" + bust,
+    "https://raw.githubusercontent.com/" + REPO + "/main/data.json?" + bust
+  ];
+  let lastErr;
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) {
+        lastErr = new Error("http " + res.status);
+        continue;
+      }
+      return await res.json();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("data");
 }
 
 async function load(attempt) {
   view.hidden = true;
-  statusEl.hidden = false;
-  statusEl.className = "status";
-  statusEl.textContent = "Обновляем информацию";
+  setStatus("Обновляем информацию", false);
   try {
-    const sha = await latestSha();
-    const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + sha + "/data.json?t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error("data");
-    render(await res.json());
+    render(await fetchData());
   } catch (err) {
-    if (attempt < 8) setTimeout(() => load(attempt + 1), 1500);
+    if (attempt < 8) setTimeout(() => load(attempt + 1), 800);
+    else setStatus("Не удалось загрузить. Нажми Обновить.", true);
   }
 }
 
-function askBot() {
-  const tg = window.Telegram && window.Telegram.WebApp;
-  statusEl.hidden = false;
-  view.hidden = true;
-  statusEl.className = "status";
-  statusEl.textContent = "Обновляем информацию";
-  if (tg && typeof tg.sendData === "function") {
-    try {
-      tg.ready();
-      tg.sendData("refresh");
-      return;
-    } catch (e) {}
-  }
-  const before = shownAt;
-  let left = 20;
+function pollForFresh(before, left) {
   const tick = async () => {
     try {
-      const sha = await latestSha();
-      const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + sha + "/data.json?t=" + Date.now(), { cache: "no-store" });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.as_of && data.as_of !== before) {
-          render(data);
-          return;
-        }
+      const data = await fetchData();
+      if (data.as_of && data.as_of !== before) {
+        render(data);
+        return;
+      }
+      if (left <= 1) {
+        render(data);
+        setStatus("Срез тот же. Жми «Дашборд» в чате, если нужны свежие цифры с биржи.", false);
+        statusEl.hidden = false;
+        return;
       }
     } catch (e) {}
     left -= 1;
-    if (left > 0) setTimeout(tick, 2000);
+    if (left > 0) setTimeout(tick, 1500);
     else load(0);
   };
   tick();
 }
 
-document.getElementById("reload").addEventListener("click", askBot);
-load(0);
+function askBot() {
+  const before = shownAt;
+  view.hidden = true;
+  setStatus("Обновляем информацию", false);
+
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    try { tg.ready(); tg.expand(); } catch (e) {}
+    // sendData доходит только из KeyboardButton web_app, не из Menu Button.
+    // Даже если вызов «успешен», без доставки бот не пушит — всегда поллим.
+    try {
+      if (typeof tg.sendData === "function") tg.sendData("refresh");
+    } catch (e) {}
+  }
+
+  pollForFresh(before, 24);
+}
+
+(function boot() {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    try { tg.ready(); tg.expand(); } catch (e) {}
+  }
+  document.getElementById("reload").addEventListener("click", askBot);
+  load(0);
+})();
 </script>
 </body>
 </html>
