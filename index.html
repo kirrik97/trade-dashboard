@@ -18,6 +18,7 @@
   .up { color: #3dd68c; }
   .dn { color: #ff5a5a; }
   .muted { color: #9a9a9a; font-size: 13px; margin-top: 4px; }
+  button { margin-top: 18px; background: #242424; color: #f2f2f2; border: 0; border-radius: 12px; padding: 12px 16px; font: inherit; }
 </style>
 </head>
 <body>
@@ -25,12 +26,12 @@
   <h1>Дашборд</h1>
   <p id="status" class="status">Обновляем информацию</p>
   <div id="view" hidden></div>
+  <button id="reload" type="button">Обновить</button>
 </main>
 <script>
 const REPO = "kirrik97/trade-dashboard";
 const statusEl = document.getElementById("status");
 const view = document.getElementById("view");
-const sha = new URLSearchParams(location.search).get("sha");
 
 function money(n) {
   const v = Number(n);
@@ -61,23 +62,33 @@ function render(data) {
   statusEl.hidden = true;
 }
 
+async function latestSha() {
+  const res = await fetch("https://api.github.com/repos/" + REPO + "/commits/main", {
+    cache: "no-store",
+    headers: { Accept: "application/vnd.github+json" }
+  });
+  if (!res.ok) throw new Error("sha");
+  const body = await res.json();
+  if (!body.sha) throw new Error("sha");
+  return body.sha;
+}
+
 async function load(attempt) {
-  if (!sha) {
-    statusEl.textContent = "Нажми «Дашборд» в боте. Сниму свежий срез и открою его здесь.";
-    statusEl.className = "sub";
-    return;
-  }
+  view.hidden = true;
   statusEl.hidden = false;
   statusEl.className = "status";
   statusEl.textContent = "Обновляем информацию";
   try {
+    const sha = await latestSha();
     const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + sha + "/data.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(String(res.status));
+    if (!res.ok) throw new Error("data");
     render(await res.json());
   } catch (err) {
-    if (attempt < 20) setTimeout(() => load(attempt + 1), 2000);
+    if (attempt < 8) setTimeout(() => load(attempt + 1), 1500);
   }
 }
+
+document.getElementById("reload").addEventListener("click", () => load(0));
 load(0);
 </script>
 </body>
