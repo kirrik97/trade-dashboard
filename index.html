@@ -50,6 +50,10 @@
   .up { color: var(--up); }
   .dn { color: var(--dn); }
   .muted { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .prices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 10px; }
+  .price-box { background: #1c1c1f; border-radius: 10px; padding: 8px 10px; }
+  .price-label { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+  .price-val { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .actions { display: flex; gap: 10px; margin-top: 18px; }
   button {
     flex: 1;
@@ -90,7 +94,7 @@
   </div>
 </main>
 <script>
-const BUILD = "20261024-2304";
+const BUILD = "20261025-1133";
 (function bustTelegramCache() {
   try {
     const u = new URL(location.href);
@@ -123,8 +127,18 @@ function money(n) {
   if (!Number.isFinite(v)) return "—";
   return (v > 0 ? "+" : "") + v.toFixed(4) + " USDT";
 }
+function px(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "—";
+  if (v >= 1000) return v.toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+  if (v >= 1) return v.toLocaleString("ru-RU", { maximumFractionDigits: 4 });
+  return v.toLocaleString("ru-RU", { maximumFractionDigits: 6 });
+}
 function tone(n) { return Number(n) < 0 ? "dn" : "up"; }
 function sideRu(side) { return side === "short" ? "шорт" : "лонг"; }
+function coinName(inst) {
+  return String(inst || "").replace(/-USDT-SWAP$/i, "").replace(/-SWAP$/i, "") || inst;
+}
 
 function mskParts(ts) {
   const d = new Date(ts || Date.now());
@@ -207,10 +221,20 @@ function render() {
   const cards = rows.map((p) => `
     <article class="card">
       <div class="row">
-        <div class="name">${p.inst}</div>
+        <div class="name">${coinName(p.inst)}</div>
         <div class="${tone(p.upl)}">${money(p.upl)}</div>
       </div>
-      <div class="muted">${sideRu(p.side)} · размер ${p.size} · вход ${p.entry}${p.lev ? " · " + p.lev + "x" : ""}${Number.isFinite(p.mark) ? " · mark " + Number(p.mark) : ""}</div>
+      <div class="muted">${sideRu(p.side)} · размер ${p.size}${p.lev ? " · " + p.lev + "x" : ""} · ${p.inst}</div>
+      <div class="prices">
+        <div class="price-box">
+          <div class="price-label">Точка входа</div>
+          <div class="price-val">${px(p.entry)}</div>
+        </div>
+        <div class="price-box">
+          <div class="price-label">Mark сейчас</div>
+          <div class="price-val">${Number.isFinite(p.mark) ? px(p.mark) : "—"}</div>
+        </div>
+      </div>
     </article>`).join("");
   view.innerHTML = `
     <div class="total ${tone(upl_total)}">${money(upl_total)}</div>
