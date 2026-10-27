@@ -94,7 +94,7 @@
   </div>
 </main>
 <script>
-const BUILD = "20261025-1133";
+const BUILD = "20261027-1756";
 (function bustTelegramCache() {
   try {
     const u = new URL(location.href);
@@ -247,11 +247,24 @@ function render() {
 
 async function fetchStructure() {
   const bust = "t=" + Date.now() + "&b=" + BUILD;
-  const urls = [
+  const urls = [];
+  // Pin by commit sha — raw @main / jsDelivr @main часто отдают Fastly-кэш 5–10 мин.
+  try {
+    const meta = await fetch(
+      "https://api.github.com/repos/" + REPO + "/commits/main?" + bust,
+      { cache: "no-store", headers: { Accept: "application/vnd.github+json" } }
+    );
+    if (meta.ok) {
+      const c = await meta.json();
+      if (c && c.sha) {
+        urls.push("https://raw.githubusercontent.com/" + REPO + "/" + c.sha + "/data.json?" + bust);
+      }
+    }
+  } catch (e) {}
+  urls.push(
     "https://raw.githubusercontent.com/" + REPO + "/main/data.json?" + bust,
-    "https://cdn.jsdelivr.net/gh/" + REPO + "@main/data.json?" + bust,
     "./data.json?" + bust
-  ];
+  );
   let lastErr;
   for (const url of urls) {
     try {
@@ -330,15 +343,14 @@ async function onRefreshClick() {
   tickClock();
 
   try {
-    if (!structure) {
-      structure = await fetchStructure();
-    } else {
-      fetchStructure().then((d) => { structure = d; }).catch(() => {});
-    }
+    // Всегда ждём свежую структуру — иначе «Обновить» крутит только mark по старому openIds
+    // и ETH/новые позиции не появляются до следующего STRUCT_MS.
+    structure = await fetchStructure();
     const n = await fetchMarks(openIds());
     render();
     lastRefreshAt = Date.now();
-    setStatus("Обновлено " + mskParts(lastRefreshAt) + " МСК", "ok");
+    const asOf = structure.as_of ? (" · срез " + structure.as_of) : "";
+    setStatus("Обновлено " + mskParts(lastRefreshAt) + " МСК" + asOf, "ok");
     haptic(n >= 0);
     reloadBtn.textContent = "Готово";
   } catch (e) {
