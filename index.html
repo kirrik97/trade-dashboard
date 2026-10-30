@@ -197,9 +197,19 @@ function uplFor(p, mark) {
 }
 
 function openIds() {
-  return ((structure && structure.positions) || [])
+  const pers = ((structure && structure.personal_positions) || []).filter((p) => p.status === "open");
+  return ((structure && structure.positions) || []).concat(pers)
     .filter((p) => Number(p.size) !== 0)
     .map((p) => p.inst);
+}
+
+function personalRows() {
+  return ((structure && structure.personal_positions) || []).map((p) => {
+    if (p.status !== "open") return { ...p, mark: marks[p.inst], upl: 0 };
+    const mark = marks[p.inst];
+    const upl = Number.isFinite(mark) ? uplFor(p, mark) : Number(p.upl);
+    return { ...p, mark, upl };
+  });
 }
 
 function computeBook() {
@@ -215,10 +225,7 @@ function computeBook() {
   return { rows, upl_total };
 }
 
-function render() {
-  if (!structure) return;
-  const { rows, upl_total } = computeBook();
-  const cards = rows.map((p) => {
+function cardHtml(p) {
     const sl = p.sl != null && p.sl !== "" ? Number(p.sl) : NaN;
     const tp = p.tp != null && p.tp !== "" ? Number(p.tp) : NaN;
     return `
@@ -227,7 +234,7 @@ function render() {
         <div class="name">${coinName(p.inst)}</div>
         <div class="${tone(p.upl)}">${money(p.upl)}</div>
       </div>
-      <div class="muted">${sideRu(p.side)} · размер ${p.size}${p.lev ? " · " + p.lev + "x" : ""} · ${p.inst}</div>
+      <div class="muted">${p.category === "personal" ? (p.status === "pending" ? "лимитка ждёт · " : "личная · ") : ""}${sideRu(p.side)} · размер ${p.size}${p.lev ? " · " + p.lev + "x" : ""} · ${p.inst}</div>
       <div class="prices">
         <div class="price-box">
           <div class="price-label">Точка входа</div>
@@ -246,12 +253,21 @@ function render() {
           <div class="price-val ${Number.isFinite(tp) ? "up" : ""}">${Number.isFinite(tp) ? px(tp) : "—"}</div>
         </div>
       </div>
+      ${p.category === "personal" && Array.isArray(p.tp_ladder) ? `<div class="muted">TP лестница: ${p.tp_ladder.map(px).join(" · ")}${p.note ? " · " + p.note : ""}</div>` : ""}
     </article>`;
-  }).join("");
+}
+
+function render() {
+  if (!structure) return;
+  const { rows, upl_total } = computeBook();
+  const cards = rows.map(cardHtml).join("");
+  const pers = personalRows();
+  const persHtml = pers.length ? `<h2 class="sub">Личные</h2>${pers.map(cardHtml).join("")}` : "";
   view.innerHTML = `
     <div class="total ${tone(upl_total)}">${money(upl_total)}</div>
     <div class="sub"></div>
     ${cards || '<p class="muted">Открытых сделок нет</p>'}
+    ${persHtml}
   `;
   view.hidden = false;
   tickClock();
