@@ -273,14 +273,21 @@ function render() {
   tickClock();
 }
 
+function fetchT(url, opts, ms) {
+  const ac = new AbortController();
+  const tm = setTimeout(() => ac.abort(), ms);
+  return fetch(url, Object.assign({}, opts, { signal: ac.signal })).finally(() => clearTimeout(tm));
+}
+
 async function fetchStructure() {
   const bust = "t=" + Date.now() + "&b=" + BUILD;
   const urls = [];
   // Pin by commit sha — raw @main / jsDelivr @main часто отдают Fastly-кэш 5–10 мин.
   try {
-    const meta = await fetch(
+    const meta = await fetchT(
       "https://api.github.com/repos/" + REPO + "/commits/main?" + bust,
-      { cache: "no-store", headers: { Accept: "application/vnd.github+json" } }
+      { cache: "no-store", headers: { Accept: "application/vnd.github+json" } },
+      2500
     );
     if (meta.ok) {
       const c = await meta.json();
@@ -296,7 +303,7 @@ async function fetchStructure() {
   let lastErr;
   for (const url of urls) {
     try {
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await fetchT(url, { cache: "no-store" }, 6000);
       if (!res.ok) throw new Error("http " + res.status);
       const data = await res.json();
       if (!Array.isArray(data.positions)) throw new Error("bad json");
@@ -310,9 +317,10 @@ async function ensureCtVal(instIds) {
   const missing = instIds.filter((id) => !ctVal[id]);
   await Promise.all(missing.map(async (instId) => {
     try {
-      const res = await fetch(
+      const res = await fetchT(
         "https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=" + encodeURIComponent(instId),
-        { cache: "force-cache" }
+        { cache: "force-cache" },
+        3000
       );
       const body = await res.json();
       const row = body && body.data && body.data[0];
