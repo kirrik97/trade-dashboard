@@ -1,1 +1,1 @@
-{"as_of": "2026-11-10 10:14 MSK", "upl_total": 0, "positions": [], "personal_positions": []}
+{"as_of": "2026-11-10 11:31 MSK", "upl_total": 0, "positions": [], "personal_positions": [{"inst": "SOL-USDT-SWAP", "side": "short", "size": "0.12", "entry": "86.05", "upl": 0.0455999999999995, "lev": "5", "sl": 98.14, "tp": 73.93, "status": "open", "category": "personal", "id": "personal-sol-short-20261110", "tp_ladder": null, "entry_limit": null, "note": "HITL Kirill 2026-11-10 11:04 one-off short; bot must not touch (long-only auto would close it)"}]}
